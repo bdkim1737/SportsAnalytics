@@ -1,0 +1,249 @@
+---
+title: "FinalMD"
+author: "Shepard Berry"
+date: "2024-11-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(here)
+library(reshape2)
+library(car)
+library(corrplot)
+library(MASS)
+```
+
+
+```{r load_and_filter_data, include=FALSE}
+mm_data <- read.csv(file.path(here(), "cbb.csv"))
+head(mm_data)
+
+# filter by relavent years and remove teams that didn't participate (might need to be higher)
+mm_data_filtered <- mm_data %>% filter(POSTSEASON != "N/A") %>% mutate(across(SEED, as.numeric))
+
+# converts the round reached in the tournament to a number of rounds passed
+convert_postseason <- function(postseason) {
+  case_when(
+    postseason == "Champions" ~ 8,
+    postseason == "2ND" ~ 7,         
+    postseason == "F4" ~ 6,         
+    postseason == "E8" ~ 5,  
+    postseason == "S16" ~ 4,
+    postseason == "R32" ~ 3,         
+    postseason == "R64" ~ 2,
+    postseason == "R68" ~ 1,
+  )
+}
+
+mm_data_filtered
+
+# apply the conversion to create a new column
+mm_data_filtered <- mm_data_filtered %>%
+  mutate(POSTSEASON_NUMERIC = convert_postseason(POSTSEASON))
+
+```
+
+
+```{r visuals}
+# correlation plots for ADJOE, ADJDE, BARTHAG, EFG_O, EFG_D, W, WAB, and Seed
+
+# ADJOE - offensive efficiency (higher is better)
+ggplot(mm_data_filtered, aes(x = ADJOE, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "ADJOE vs Postseason Performance")
+
+# ADJDE - defensive efficiency (lower is better)
+ggplot(mm_data_filtered, aes(x = ADJDE, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "ADJDE vs Postseason Performance")
+
+# BARTHAG - Power Rating (chance of beating an average D1 team, higher is better)
+ggplot(mm_data_filtered, aes(x = BARTHAG, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "BARTHAG vs Postseason Performance")
+
+# EFG_O - Effective Field Goal Percentage Made (higher better)
+ggplot(mm_data_filtered, aes(x = EFG_O, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "EFG_O vs Postseason Performance")
+
+# EFG_D - Effective Field Goal Percentage Allowed (lower better)
+ggplot(mm_data_filtered, aes(x = EFG_D, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "EFG_D vs Postseason Performance")
+
+# W - wins in the season (higher better)
+ggplot(mm_data_filtered, aes(x = W, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Wins vs Postseason Performance")
+
+# WAB - Wins Above Bubbleo
+ggplot(mm_data_filtered, aes(x = WAB, y = POSTSEASON_NUMERIC)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "WAB vs Postseason Performance")
+
+# SEED
+ggplot(mm_data_filtered, aes(x = SEED, y = POSTSEASON_NUMERIC)) +
+  geom_jitter(width = 0.2, height = 0.2, alpha = 0.6) +
+  labs(
+    title = "Scatter Plot of SEED vs Postseason Outcome",
+    x = "Tournament Seed",
+    y = "Postseason Outcome"
+  ) +
+  geom_smooth(method = "lm")
+```
+```{r correlations}
+correlation_vars <- mm_data_filtered %>%
+  dplyr::select(-TEAM, -CONF, -POSTSEASON)
+
+# compute correlation matrix
+corr_matrix <- cor(correlation_vars, use = "complete.obs")
+
+corrplot(corr_matrix, method = "circle", width = 12, height = 12)
+
+# sort correlations with POSTSEASON_NUMERIC
+postseason_correlations <- cor_matrix["POSTSEASON_NUMERIC", ]
+sorted_correlations <- sort(postseason_correlations, decreasing = TRUE)
+
+sorted_correlations
+```
+
+```{r model, include=FALSE}
+# select numeric and non-categorical data only
+data_model <- mm_data_filtered %>% 
+  dplyr::select(-TEAM, -CONF, -POSTSEASON, -YEAR)
+
+# split into training and test sets
+set.seed(123)
+data_model <- data_model[!is.na(data_model$POSTSEASON_NUMERIC), ]
+trainIndex <- createDataPartition(data_model$POSTSEASON_NUMERIC, p = 0.8, list = FALSE)
+train <- data_model[trainIndex, ]
+test <- data_model[-trainIndex, ]
+
+
+regression_model <- glm(POSTSEASON_NUMERIC ~ ., data = train, family="poisson")
+
+# multicollinearity
+vif(regression_model)
+
+# summary of the regression model
+summary(regression_model)
+
+# use a stepwise model to remove and add variables to get most significant ones
+stepwise_model <- stepAIC(regression_model, 
+                          direction = "both", 
+                          trace = FALSE)  # Suppress output for clarity
+
+# summary of the stepwise model
+summary(stepwise_model)
+
+# select refined data and train final model
+refined_data <- mm_data_filtered %>%
+  dplyr::select(W, ADJOE, ADJDE, BARTHAG, EFG_O, TOR, TORD, ORB, DRB, FTR, X3P_O, X2P_D, X3P_D, WAB, POSTSEASON_NUMERIC)
+
+#   dplyr::select(W, ADJOE, ADJDE, BARTHAG, EFG_O, TOR, TORD, ORB, DRB, FTR, X3P_O, X2P_D, X3P_D, WAB, POSTSEASON_NUMERIC)
+
+refined_data <- refined_data[!is.na(refined_data$POSTSEASON_NUMERIC), ]
+trainIndex <- createDataPartition(refined_data$POSTSEASON_NUMERIC, p = 0.8, list = FALSE)
+train <- refined_data[trainIndex, ]
+test <- refined_data[-trainIndex, ]
+
+
+new_regression_model <- glm(POSTSEASON_NUMERIC ~ ., data = train, family="poisson")
+
+summary(new_regression_model)
+
+vif(new_regression_model)
+
+# perform predictions and round
+predictions <- predict(new_regression_model, test, type = "response")
+
+# convert predictions to discrete values (1 to 8)
+predicted_classes <- round(predictions)  # Round to nearest integer
+
+# ensure predictions are within the range of 1-8 
+predicted_classes <- pmin(pmax(predicted_classes, 1), 8)
+
+# ensure that both predicted and actual classes have the same levels
+predicted_classes <- factor(predicted_classes, levels = 1:8)
+actual_classes <- factor(test$POSTSEASON_NUMERIC, levels = 1:8)
+
+# create the confusion matrix
+conf_matrix <- confusionMatrix(predicted_classes, actual_classes)
+conf_matrix_df <- as.data.frame(as.table(conf_matrix))
+
+# plot the confusion matrix using ggplot2
+ggplot(conf_matrix_df, aes(x = Prediction, y = Reference, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "Predicted", y = "Actual", title = "Confusion Matrix") +
+  theme_minimal()
+```
+
+```{r rlm_robust_model}
+# use an RLM to better handle outliers 
+robust_model <- rlm(POSTSEASON_NUMERIC ~ ., data=train, family="poisson")
+
+# compare residuals
+residuals_data <- data.frame(
+  Fitted = c(fitted(new_regression_model), fitted(robust_model)),
+  Residuals = c(residuals(new_regression_model), residuals(robust_model)),
+  Model = rep(c("Linear Model (new_regression_model)", "Robust Model"), each = nrow(train))
+)
+ggplot(residuals_data, aes(x = Fitted, y = Residuals, color = Model)) +
+  geom_point(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals Comparison: Linear vs Robust Model",
+       x = "Fitted Values",
+       y = "Residuals") +
+  scale_color_manual(values = c("Linear Model (new_regression_model)" = "blue", "Robust Model" = "orange")) +
+  theme_minimal()
+
+# - The robust model residuals are generally better distributed and less sensitive to outliers, which is a key benefit of robust regression.
+# - The spread of residuals seems more uniform compared to the linear regression residuals.
+
+
+# see how the RLM model performs
+
+# perform predictions and round
+predictions <- predict(robust_model, test, type = "response")
+
+# convert predictions to discrete values (1 to 8)
+predicted_classes <- round(predictions)  # Round to nearest integer
+
+# ensure predictions are within the range of 1-8 
+predicted_classes <- pmin(pmax(predicted_classes, 1), 8)
+
+# ensure that both predicted and actual classes have the same levels
+predicted_classes <- factor(predicted_classes, levels = 1:8)
+actual_classes <- factor(test$POSTSEASON_NUMERIC, levels = 1:8)
+
+# create the confusion matrix
+conf_matrix <- confusionMatrix(predicted_classes, actual_classes)
+conf_matrix_df <- as.data.frame(as.table(conf_matrix))
+
+# plot the confusion matrix using ggplot2
+ggplot(conf_matrix_df, aes(x = Prediction, y = Reference, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "Predicted", y = "Actual", title = "Confusion Matrix") +
+  theme_minimal()
+
+
+# the RLM is slightly better at predicting later rounds, which makes sense because it's better at handling outliers.
+```
+
